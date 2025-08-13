@@ -57,6 +57,6 @@ IMPORTANT:
 This tool is for educational purposes only.
 Do not attempt to access wallets you do not own. Doing so is illegal and punishable by law.
 The author is not responsible for any misuse of this software.
-Use at your own risk.2
+Use at your own risk.
 
 MIT License. See LICENSE for details.
