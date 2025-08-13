@@ -4,6 +4,7 @@ import threading
 import queue
 import requests
 from bit import Key
+import os
 
 API_URL = "https://blockchain.info/rawaddr/"
 
@@ -24,15 +25,19 @@ class Worker(threading.Thread):
                 wif = key.to_wif()
 
                 tx_count, balance = self.get_address_info(address)
+
+                # Send to UI
                 self.q.put((address, wif, tx_count, balance))
 
+                # Save only if TX or Balance > 0
                 if tx_count > 0 or balance > 0:
-                    with open("Found Wallet.txt", "a") as f:
+                    with open("Found_Wallets.txt", "a") as f:
                         f.write(f"Address: {address}\n")
-                        f.write(f"WIF: {wif}\n")
+                        f.write(f"Private Key (WIF): {wif}\n")
                         f.write(f"TX Count: {tx_count}\n")
                         f.write(f"Balance: {balance} BTC\n")
                         f.write("-" * 40 + "\n")
+
             except Exception as e:
                 self.q.put(("error", str(e)))
 
@@ -57,6 +62,18 @@ class BTCCheckerApp:
         self.queue = queue.Queue()
         self.stop_event = threading.Event()
 
+        # BTC Icon
+        icon_path = "btc.ico"
+        if os.path.exists(icon_path):
+            self.root.iconbitmap(icon_path)
+
+        # Dark Theme
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure(".", background="black", foreground="white", fieldbackground="black")
+        style.configure("Treeview", background="black", foreground="white", fieldbackground="black")
+        style.configure("Treeview.Heading", background="black", foreground="white")
+
         self.setup_ui()
         self.worker = None
         self.root.after(100, self.process_queue)
@@ -75,34 +92,36 @@ class BTCCheckerApp:
         self.stop_btn = ttk.Button(frame, text="Stop", command=self.stop_worker, state=tk.DISABLED)
         self.stop_btn.grid(row=0, column=3)
 
-        # Treeview + Scrollbars
-        tree_frame = ttk.Frame(frame)
-        tree_frame.grid(row=1, column=0, columnspan=4, pady=10, sticky="nsew")
-        frame.grid_rowconfigure(1, weight=1)
-        frame.grid_columnconfigure(0, weight=1)
-
-        self.tree = ttk.Treeview(tree_frame, columns=("Address", "WIF", "TX Count", "Balance"), show="headings")
+        # Treeview with Scrollbar
+        self.tree = ttk.Treeview(frame, columns=("Address", "WIF", "TX Count", "Balance"), show="headings")
         for col in self.tree["columns"]:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=200, anchor="w")
+            self.tree.column(col, width=150)
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
 
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
+        self.tree.grid(row=1, column=0, columnspan=4, pady=10, sticky="nsew")
+        vsb.grid(row=1, column=4, sticky="ns")
 
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
 
-        # Right-click copy menu
-        self.menu = tk.Menu(self.root, tearoff=0)
-        self.menu.add_command(label="Copy Address", command=lambda: self.copy_column(0))
-        self.menu.add_command(label="Copy WIF", command=lambda: self.copy_column(1))
+        # Double-click to copy
+        self.tree.bind("<Double-1>", self.copy_cell_value)
 
-        self.tree.bind("<Button-3>", self.show_menu)
+    def copy_cell_value(self, event):
+        item_id = self.tree.focus()
+        if not item_id:
+            return
+        col = self.tree.identify_column(event.x)
+        col_index = int(col.replace("#", "")) - 1
+        value = self.tree.item(item_id)["values"][col_index]
+        if value:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(str(value))
+            self.root.update()
+            messagebox.showinfo("Copied", f"Copied: {value}")
 
     def start_worker(self):
         count = self.count_var.get()
@@ -132,35 +151,13 @@ class BTCCheckerApp:
                 elif item[0] == "error":
                     messagebox.showerror("Error", item[1])
                 else:
-                    # Insert and auto-scroll
                     row_id = self.tree.insert("", tk.END, values=item)
-                    self.tree.see(row_id)  # Auto-scroll to latest row
+                    self.tree.see(row_id)  # Auto-scroll to latest
         except queue.Empty:
             pass
         self.root.after(100, self.process_queue)
 
-    def show_menu(self, event):
-        try:
-            row_id = self.tree.identify_row(event.y)
-            if row_id:
-                self.tree.selection_set(row_id)
-                self.menu.post(event.x_root, event.y_root)
-        except:
-            pass
-
-    def copy_column(self, col_index):
-        try:
-            selected = self.tree.selection()
-            if selected:
-                value = self.tree.item(selected[0])["values"][col_index]
-                self.root.clipboard_clear()
-                self.root.clipboard_append(value)
-                self.root.update()
-        except:
-            pass
-
 if __name__ == "__main__":
     root = tk.Tk()
-    root.geometry("900x400")
     app = BTCCheckerApp(root)
     root.mainloop()
