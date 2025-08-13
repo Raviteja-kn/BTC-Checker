@@ -59,5 +59,4 @@ Do not attempt to access wallets you do not own. Doing so is illegal and punisha
 The author is not responsible for any misuse of this software.
 Use at your own risk.2
 
-License
 MIT License. See LICENSE for details.
