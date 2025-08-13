@@ -67,42 +67,69 @@ class BTCCheckerApp:
         if os.path.exists(icon_path):
             self.root.iconbitmap(icon_path)
 
-        # Dark Theme
+        # Modern Light Theme
+        self.root.tk_setPalette(background='#f0f0f0', foreground='#333333',
+                                activeBackground='#e0e0e0', activeForeground='#333333')
+
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure(".", background="black", foreground="white", fieldbackground="black")
-        style.configure("Treeview", background="black", foreground="white", fieldbackground="black")
-        style.configure("Treeview.Heading", background="black", foreground="white")
+
+        # Configure styles for a modern look
+        style.configure("TFrame", background='#f0f0f0')
+        style.configure("TLabel", background='#f0f0f0', foreground='#333333', font=('Helvetica', 10))
+        style.configure("TButton", background='#0078d7', foreground='white', font=('Helvetica', 10, 'bold'), borderwidth=0)
+        style.map("TButton", background=[('active', '#005a9e')])
+        style.configure("TEntry", fieldbackground='white', foreground='#333333', borderwidth=1, relief='solid')
+
+        # Treeview Styles
+        style.configure("Treeview", background='white', foreground='#333333',
+                        fieldbackground='white', font=('Helvetica', 9), borderwidth=1, relief='solid')
+        style.configure("Treeview.Heading", font=('Helvetica', 10, 'bold'),
+                        background='#e0e0e0', foreground='#333333', borderwidth=1, relief='solid')
+        style.map("Treeview", background=[('selected', '#b3d7ff')])
 
         self.setup_ui()
         self.worker = None
         self.root.after(100, self.process_queue)
 
     def setup_ui(self):
-        frame = ttk.Frame(self.root, padding=10)
+        frame = ttk.Frame(self.root, padding=15)
         frame.pack(fill=tk.BOTH, expand=True)
 
+        # Top control frame
+        top_frame = ttk.Frame(frame, padding=(0, 0, 0, 10))
+        top_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+
         self.count_var = tk.IntVar(value=10)
-        ttk.Label(frame, text="Number of addresses:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.count_var, width=10).grid(row=0, column=1)
+        ttk.Label(top_frame, text="Number of addresses:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(top_frame, textvariable=self.count_var, width=10).pack(side=tk.LEFT, padx=(0, 15))
 
-        self.start_btn = ttk.Button(frame, text="Start", command=self.start_worker)
-        self.start_btn.grid(row=0, column=2, padx=5)
+        self.start_btn = ttk.Button(top_frame, text="Start", command=self.start_worker)
+        self.start_btn.pack(side=tk.LEFT, padx=5)
 
-        self.stop_btn = ttk.Button(frame, text="Stop", command=self.stop_worker, state=tk.DISABLED)
-        self.stop_btn.grid(row=0, column=3)
+        self.stop_btn = ttk.Button(top_frame, text="Stop", command=self.stop_worker, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT)
 
-        # Treeview with Scrollbar
-        self.tree = ttk.Treeview(frame, columns=("Address", "WIF", "TX Count", "Balance"), show="headings")
+        # Treeview with Scrollbar in its own frame
+        tree_frame = ttk.Frame(frame)
+        tree_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+
+        self.tree = ttk.Treeview(tree_frame, columns=("Address", "WIF", "TX Count", "Balance"), show="headings")
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
         for col in self.tree["columns"]:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=150)
+            self.tree.heading(col, text=col, anchor='w')
+            self.tree.column(col, width=200, anchor='w')
 
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.configure(yscrollcommand=vsb.set)
-
-        self.tree.grid(row=1, column=0, columnspan=4, pady=10, sticky="nsew")
-        vsb.grid(row=1, column=4, sticky="ns")
+        
+        # Adjust column widths
+        self.tree.column("Address", width=200)
+        self.tree.column("WIF", width=250)
+        self.tree.column("TX Count", width=80)
+        self.tree.column("Balance", width=100)
 
         frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
@@ -114,19 +141,26 @@ class BTCCheckerApp:
         item_id = self.tree.focus()
         if not item_id:
             return
+        
         col = self.tree.identify_column(event.x)
+        if col == '': return
+        
         col_index = int(col.replace("#", "")) - 1
         value = self.tree.item(item_id)["values"][col_index]
         if value:
             self.root.clipboard_clear()
             self.root.clipboard_append(str(value))
             self.root.update()
-            messagebox.showinfo("Copied", f"Copied: {value}")
+            messagebox.showinfo("Copied", f"Copied: {value}", parent=self.root)
 
     def start_worker(self):
-        count = self.count_var.get()
-        if count <= 0:
-            messagebox.showerror("Error", "Please enter a valid count.")
+        try:
+            count = self.count_var.get()
+            if count <= 0:
+                messagebox.showerror("Error", "Please enter a valid count.", parent=self.root)
+                return
+        except tk.TclError:
+            messagebox.showerror("Error", "Please enter a valid number.", parent=self.root)
             return
 
         self.tree.delete(*self.tree.get_children())
@@ -149,10 +183,10 @@ class BTCCheckerApp:
                     self.start_btn.config(state=tk.NORMAL)
                     self.stop_btn.config(state=tk.DISABLED)
                 elif item[0] == "error":
-                    messagebox.showerror("Error", item[1])
+                    messagebox.showerror("Error", item[1], parent=self.root)
                 else:
                     row_id = self.tree.insert("", tk.END, values=item)
-                    self.tree.see(row_id)  # Auto-scroll to latest
+                    self.tree.see(row_id)
         except queue.Empty:
             pass
         self.root.after(100, self.process_queue)
