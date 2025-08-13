@@ -28,7 +28,7 @@ A simple Python application to generate Bitcoin addresses, check their balances 
 
 1. Clone the repository:
  
-"git clone https://github.com/YOUR_USERNAME/BTC-Address-Checker.git
+"git clone https://github.com/Raviteja-kn/BTC-Checker.git
 cd BTC-Address-Checker"
 
 2. Install dependencies:
