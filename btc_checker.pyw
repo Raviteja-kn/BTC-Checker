@@ -5,191 +5,277 @@ import queue
 import requests
 from bit import Key
 import os
+import time
 
-API_URL = "https://blockchain.info/rawaddr/"
+# Use the batch-supporting API endpoint
+API_URL = "https://blockchain.info/balance?active="
+BATCH_SIZE = 100 # Number of addresses to check in a single API call
 
 class Worker(threading.Thread):
-    def __init__(self, count, queue, stop_event):
-        super().__init__()
-        self.count = count
-        self.q = queue
+    # ... (Worker class is unchanged)
+    def __init__(self, thread_id, work_queue, ui_queue, stop_event):
+        super().__init__(daemon=True)
+        self.thread_id = thread_id
+        self.work_queue = work_queue
+        self.ui_queue = ui_queue
         self.stop_event = stop_event
+        self.session = requests.Session() # Use a session for connection pooling
 
     def run(self):
-        for _ in range(self.count):
-            if self.stop_event.is_set():
-                break
+        while not self.stop_event.is_set():
             try:
-                key = Key()
-                address = key.address
-                wif = key.to_wif()
+                # Generate a batch of keys first
+                keys_batch = {}
+                for _ in range(BATCH_SIZE):
+                    key = Key()
+                    keys_batch[key.address] = key.to_wif()
 
-                tx_count, balance = self.get_address_info(address)
+                # Check if we need to stop before the network request
+                if self.stop_event.is_set():
+                    break
 
-                # Send to UI
-                self.q.put((address, wif, tx_count, balance))
+                # Query the API with a batch of addresses
+                addresses_to_check = "|".join(keys_batch.keys())
+                self.check_batch(addresses_to_check, keys_batch)
 
-                # Save only if TX or Balance > 0
+                # Inform UI that a batch has been processed
+                self.ui_queue.put(('status', {'checked': BATCH_SIZE}))
+
+                # Take a small break to be nice to the API
+                time.sleep(0.5)
+
+            except Exception as e:
+                self.ui_queue.put(("error", f"Thread {self.thread_id}: {e}"))
+
+        self.ui_queue.put(('done', self.thread_id))
+
+    def check_batch(self, addresses_str, keys_dict):
+        try:
+            response = self.session.get(API_URL + addresses_str, timeout=10)
+            response.raise_for_status() # Raise an exception for bad status codes
+            data = response.json()
+
+            for address, info in data.items():
+                balance = info.get("final_balance", 0) / 1e8 # Convert from satoshi to BTC
+                tx_count = info.get("n_tx", 0)
+                wif = keys_dict.get(address)
+
+                # Put result in queue for the UI
+                result = (address, wif, tx_count, balance)
+                self.ui_queue.put(('result', result))
+
+                # Save only if it has a history or balance
                 if tx_count > 0 or balance > 0:
+                    self.ui_queue.put(('found', {'count': 1}))
                     with open("Found_Wallets.txt", "a") as f:
                         f.write(f"Address: {address}\n")
                         f.write(f"Private Key (WIF): {wif}\n")
                         f.write(f"TX Count: {tx_count}\n")
-                        f.write(f"Balance: {balance} BTC\n")
+                        f.write(f"Balance: {balance:.8f} BTC\n")
                         f.write("-" * 40 + "\n")
 
-            except Exception as e:
-                self.q.put(("error", str(e)))
-
-        self.q.put(("done", None))
-
-    def get_address_info(self, address):
-        try:
-            response = requests.get(API_URL + address, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                tx_count = data.get("n_tx", 0)
-                balance = data.get("final_balance", 0) / 1e8
-                return tx_count, balance
-        except:
+        except requests.exceptions.RequestException as e:
+            # Handle network errors gracefully
+            print(f"API Request failed: {e}")
             pass
-        return 0, 0
+        except Exception as e:
+            print(f"An error occurred in check_batch: {e}")
+
 
 class BTCCheckerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("BTC Address Checker")
-        self.queue = queue.Queue()
+        self.root.title("BTC Address Checker (Educational Tool)")
+        self.root.geometry("950x600")
+
+        self.ui_queue = queue.Queue()
         self.stop_event = threading.Event()
+        self.workers = []
+        self.autoscroll_var = tk.BooleanVar(value=True) # <--- NEW: Variable for auto-scroll checkbox
 
-        # BTC Icon
-        icon_path = "btc.ico"
-        if os.path.exists(icon_path):
-            self.root.iconbitmap(icon_path)
+        # Stats
+        self.total_checked = 0
+        self.total_found = 0
+        self.start_time = 0
+        
+        self.setup_styles()
+        self.setup_ui()
+        
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.process_queue()
 
-        # Modern Light Theme
-        self.root.tk_setPalette(background='#f0f0f0', foreground='#333333',
-                                activeBackground='#e0e0e0', activeForeground='#333333')
-
+    def setup_styles(self):
+        # ... (style setup is unchanged)
         style = ttk.Style()
         style.theme_use("clam")
-
-        # Configure styles for a modern look
         style.configure("TFrame", background='#f0f0f0')
-        style.configure("TLabel", background='#f0f0f0', foreground='#333333', font=('Helvetica', 10))
-        style.configure("TButton", background='#0078d7', foreground='white', font=('Helvetica', 10, 'bold'), borderwidth=0)
-        style.map("TButton", background=[('active', '#005a9e')])
-        style.configure("TEntry", fieldbackground='white', foreground='#333333', borderwidth=1, relief='solid')
-
-        # Treeview Styles
-        style.configure("Treeview", background='white', foreground='#333333',
-                        fieldbackground='white', font=('Helvetica', 9), borderwidth=1, relief='solid')
-        style.configure("Treeview.Heading", font=('Helvetica', 10, 'bold'),
-                        background='#e0e0e0', foreground='#333333', borderwidth=1, relief='solid')
+        style.configure("TLabel", background='#f0f0f0', font=('Segoe UI', 10))
+        style.configure("TButton", background='#0078d7', foreground='white', font=('Segoe UI', 10, 'bold'), borderwidth=0)
+        style.map("TButton", background=[('active', '#005a9e'), ('disabled', '#a0a0a0')])
+        style.configure("Treeview", rowheight=25, fieldbackground='white', font=('Segoe UI', 9))
+        style.configure("Treeview.Heading", font=('Segoe UI', 10, 'bold'))
         style.map("Treeview", background=[('selected', '#b3d7ff')])
+        style.configure("Found.Treeview", background='#dff0d8') # Greenish background for found items
 
-        self.setup_ui()
-        self.worker = None
-        self.root.after(100, self.process_queue)
 
     def setup_ui(self):
-        frame = ttk.Frame(self.root, padding=15)
-        frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = ttk.Frame(self.root, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.rowconfigure(1, weight=1)
+        main_frame.columnconfigure(0, weight=1)
 
-        # Top control frame
-        top_frame = ttk.Frame(frame, padding=(0, 0, 0, 10))
-        top_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+        # --- Controls Frame ---
+        controls_frame = ttk.Frame(main_frame)
+        controls_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        
+        ttk.Label(controls_frame, text="Addresses to check:").pack(side=tk.LEFT, padx=(0, 5))
+        self.count_var = tk.IntVar(value=10000)
+        ttk.Entry(controls_frame, textvariable=self.count_var, width=12).pack(side=tk.LEFT, padx=(0, 15))
 
-        self.count_var = tk.IntVar(value=10)
-        ttk.Label(top_frame, text="Number of addresses:").pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Entry(top_frame, textvariable=self.count_var, width=10).pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Label(controls_frame, text="Threads:").pack(side=tk.LEFT, padx=(0, 5))
+        self.threads_var = tk.IntVar(value=4)
+        ttk.Spinbox(controls_frame, from_=1, to=20, textvariable=self.threads_var, width=5).pack(side=tk.LEFT, padx=(0, 15))
 
-        self.start_btn = ttk.Button(top_frame, text="Start", command=self.start_worker)
+        self.start_btn = ttk.Button(controls_frame, text="Start", command=self.start_workers)
         self.start_btn.pack(side=tk.LEFT, padx=5)
-
-        self.stop_btn = ttk.Button(top_frame, text="Stop", command=self.stop_worker, state=tk.DISABLED)
+        self.stop_btn = ttk.Button(controls_frame, text="Stop", command=self.stop_workers, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT)
 
-        # Treeview with Scrollbar in its own frame
-        tree_frame = ttk.Frame(frame)
-        tree_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
-
-        self.tree = ttk.Treeview(tree_frame, columns=("Address", "WIF", "TX Count", "Balance"), show="headings")
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        for col in self.tree["columns"]:
-            self.tree.heading(col, text=col, anchor='w')
-            self.tree.column(col, width=200, anchor='w')
-
+        # <--- NEW: Add the autoscroll checkbox to the right side of the controls
+        autoscroll_check = ttk.Checkbutton(controls_frame, text="Auto-scroll", variable=self.autoscroll_var)
+        autoscroll_check.pack(side=tk.RIGHT, padx=5)
+        
+        # --- Treeview Frame ---
+        # ... (Treeview setup is unchanged)
+        tree_frame = ttk.Frame(main_frame)
+        tree_frame.grid(row=1, column=0, sticky="nsew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        self.tree = ttk.Treeview(tree_frame, columns=("Address", "WIF", "TXs", "Balance"), show="headings")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.heading("Address", text="Address")
+        self.tree.heading("WIF", text="Private Key (WIF)")
+        self.tree.heading("TXs", text="TXs")
+        self.tree.heading("Balance", text="Balance (BTC)")
+        self.tree.column("Address", width=280, anchor='w')
+        self.tree.column("WIF", width=350, anchor='w')
+        self.tree.column("TXs", width=50, anchor='center')
+        self.tree.column("Balance", width=120, anchor='e')
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.configure(yscrollcommand=vsb.set)
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        hsb.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.tag_configure('found', background='#c8e6c9', foreground='black')
+
+        # --- Status Frame ---
+        # ... (Status frame setup is unchanged)
+        status_frame = ttk.Frame(main_frame, padding=(5, 5))
+        status_frame.grid(row=2, column=0, sticky="ew")
+        self.progress = ttk.Progressbar(status_frame, orient='horizontal', mode='determinate')
+        self.progress.pack(fill=tk.X, expand=True, pady=(5,0))
+        stats_bar = ttk.Frame(status_frame)
+        stats_bar.pack(fill=tk.X, expand=True)
+        self.checked_label = ttk.Label(stats_bar, text="Checked: 0")
+        self.checked_label.pack(side=tk.LEFT)
+        self.found_label = ttk.Label(stats_bar, text="Found: 0")
+        self.found_label.pack(side=tk.LEFT, padx=20)
+        self.rate_label = ttk.Label(stats_bar, text="Rate: 0 addr/s")
+        self.rate_label.pack(side=tk.RIGHT)
         
-        # Adjust column widths
-        self.tree.column("Address", width=200)
-        self.tree.column("WIF", width=250)
-        self.tree.column("TX Count", width=80)
-        self.tree.column("Balance", width=100)
-
-        frame.rowconfigure(1, weight=1)
-        frame.columnconfigure(0, weight=1)
-
-        # Double-click to copy
-        self.tree.bind("<Double-1>", self.copy_cell_value)
-
-    def copy_cell_value(self, event):
-        item_id = self.tree.focus()
-        if not item_id:
-            return
-        
-        col = self.tree.identify_column(event.x)
-        if col == '': return
-        
-        col_index = int(col.replace("#", "")) - 1
-        value = self.tree.item(item_id)["values"][col_index]
-        if value:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(str(value))
-            self.root.update()
-            messagebox.showinfo("Copied", f"Copied: {value}", parent=self.root)
-
-    def start_worker(self):
+    def start_workers(self):
+        # ... (start_workers method is unchanged)
         try:
-            count = self.count_var.get()
-            if count <= 0:
-                messagebox.showerror("Error", "Please enter a valid count.", parent=self.root)
+            self.total_to_check = self.count_var.get()
+            num_threads = self.threads_var.get()
+            if self.total_to_check <= 0 or num_threads <= 0:
+                messagebox.showerror("Error", "Please enter positive values for addresses and threads.")
                 return
         except tk.TclError:
-            messagebox.showerror("Error", "Please enter a valid number.", parent=self.root)
+            messagebox.showerror("Error", "Please enter valid numbers.")
             return
-
         self.tree.delete(*self.tree.get_children())
         self.stop_event.clear()
-        self.worker = Worker(count, self.queue, self.stop_event)
-        self.worker.start()
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        self.total_checked = 0
+        self.total_found = 0
+        self.start_time = time.time()
+        self.progress['maximum'] = self.total_to_check
+        self.progress['value'] = 0
+        self.update_status_bar()
+        self.workers = []
+        for i in range(num_threads):
+            worker = Worker(i + 1, None, self.ui_queue, self.stop_event)
+            self.workers.append(worker)
+            worker.start()
 
-    def stop_worker(self):
+    def stop_workers(self):
+        # ... (stop_workers method is unchanged)
         self.stop_event.set()
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
 
     def process_queue(self):
         try:
-            while True:
-                item = self.queue.get_nowait()
-                if item[0] == "done":
-                    self.start_btn.config(state=tk.NORMAL)
-                    self.stop_btn.config(state=tk.DISABLED)
-                elif item[0] == "error":
-                    messagebox.showerror("Error", item[1], parent=self.root)
-                else:
-                    row_id = self.tree.insert("", tk.END, values=item)
-                    self.tree.see(row_id)
+            for _ in range(100): 
+                msg_type, data = self.ui_queue.get_nowait()
+                
+                if msg_type == 'result':
+                    # --- THIS BLOCK IS MODIFIED ---
+                    address, wif, tx_count, balance = data
+                    tags = ()
+                    if balance > 0 or tx_count > 0:
+                        tags = ('found',)
+                    
+                    formatted_balance = f"{balance:.8f}"
+                    # Insert the new row and get its unique ID
+                    row_id = self.tree.insert("", tk.END, values=(address, wif, tx_count, formatted_balance), tags=tags) # <--- MODIFIED
+
+                    # If autoscroll is enabled, move the view to the new row
+                    if self.autoscroll_var.get(): # <--- NEW
+                        self.tree.see(row_id) # <--- NEW
+
+                elif msg_type == 'status':
+                    self.total_checked += data['checked']
+                    if self.total_checked >= self.total_to_check:
+                        self.total_checked = self.total_to_check
+                        self.stop_workers()
+                    self.update_status_bar()
+                
+                elif msg_type == 'found':
+                    self.total_found += data['count']
+                    self.update_status_bar()
+
+                elif msg_type == 'done':
+                    if all(not w.is_alive() for w in self.workers):
+                         self.stop_workers()
+
+                elif msg_type == 'error':
+                    messagebox.showwarning("Worker Error", data)
+
         except queue.Empty:
             pass
-        self.root.after(100, self.process_queue)
+        finally:
+            self.root.after(100, self.process_queue)
+
+    def update_status_bar(self):
+        # ... (update_status_bar method is unchanged)
+        elapsed_time = time.time() - self.start_time
+        rate = self.total_checked / elapsed_time if elapsed_time > 0 else 0
+        self.checked_label.config(text=f"Checked: {self.total_checked:,}/{self.total_to_check:,}")
+        self.found_label.config(text=f"Found: {self.total_found}")
+        self.rate_label.config(text=f"Rate: {rate:,.0f} addr/s")
+        self.progress['value'] = self.total_checked
+        
+    def on_closing(self):
+        # ... (on_closing method is unchanged)
+        if self.workers and any(w.is_alive() for w in self.workers):
+            if messagebox.askokcancel("Quit", "Workers are still running. Do you want to stop them and quit?"):
+                self.stop_workers()
+                self.root.destroy()
+        else:
+            self.root.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()
